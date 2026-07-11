@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
 const SUPABASE_URL = "https://ljfjhfwsxhkzkdbuwvsd.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1zZmppa29mcW1qaXhienVuY21zIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2ODI5NjYsImV4cCI6MjA5OTI1ODk2Nn0._yHAV963H3H07xIblh1PyYUSmIYAFy_1Mlfk6kQDBo8";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxqZmpoZndzeGhremtkYnV3dnNkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM2ODMyNDgsImV4cCI6MjA5OTI1OTI0OH0.mnfr7K-eZjuzHtRkYlaPgAul3A6Lppm6ok5qX4yujXY";
 const TABLE = "wc2030_travellers";
 const TARGET_PER_PERSON = 17000;
 const TRIP_DATE = new Date("2030-06-08");
