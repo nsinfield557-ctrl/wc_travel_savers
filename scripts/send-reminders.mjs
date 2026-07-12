@@ -6,6 +6,7 @@ const SUPABASE_URL = process.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const SITE_URL = process.env.SITE_URL || "https://nsinfield557-ctrl.github.io/wc_travel_savers/";
+const FILTER_NAME = process.env.TRAVELLER_NAME || "";
 
 const DEFAULT_TARGET = 17000;
 const TRIP_DATE = new Date("2030-06-08");
@@ -163,7 +164,10 @@ async function main() {
     budgetMap[b.traveller_id].push(b.amount);
   });
 
-  const withEmails = travellers.filter(t => t.email && t.email.trim());
+  const withEmails = travellers.filter(t => 
+  t.email && t.email.trim() && 
+  (!FILTER_NAME || t.name.toLowerCase() === FILTER_NAME.toLowerCase())
+  );
   console.log(`Found ${withEmails.length} travellers with email addresses`);
 
   const months = monthsUntilTrip();
