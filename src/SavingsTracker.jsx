@@ -1,15 +1,14 @@
 import { useState, useEffect, useCallback } from "react";
 
-
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const TABLE = "wc2030_travellers";
-const TARGET_PER_PERSON = 17000;
+const BUDGETS_TABLE = "wc2030_budgets";
 const TRIP_DATE = new Date("2030-06-08");
 
 const COLORS = ["#4f8ef7","#a78bfa","#34d399","#f87171","#ffcd00","#fb923c","#e879f9","#38bdf8","#4ade80","#f472b6"];
 
-const BUDGET_BREAKDOWN = [
+const DEFAULT_CATEGORIES = [
   { label: "Flights", amount: 5000, icon: "✈️", color: "#4f8ef7" },
   { label: "Accommodation", amount: 3500, icon: "🏨", color: "#a78bfa" },
   { label: "Match Tickets", amount: 900, icon: "⚽", color: "#ffcd00" },
@@ -18,6 +17,8 @@ const BUDGET_BREAKDOWN = [
   { label: "Insurance", amount: 500, icon: "🛡️", color: "#fb923c" },
   { label: "Spending money", amount: 2400, icon: "💶", color: "#e879f9" },
 ];
+
+const DEFAULT_TARGET = DEFAULT_CATEGORIES.reduce((s, c) => s + c.amount, 0);
 
 function monthsUntilTrip() {
   return Math.max(1, Math.round((TRIP_DATE - new Date()) / (1000 * 60 * 60 * 24 * 30.44)));
@@ -67,6 +68,7 @@ function ProgressRing({ pct, size = 80, stroke = 7, color = "#ffcd00", children 
 
 export default function SavingsTracker() {
   const [travellers, setTravellers] = useState([]);
+  const [budgets, setBudgets] = useState({}); // { traveller_id: { category: amount } }
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState("overview");
@@ -74,11 +76,12 @@ export default function SavingsTracker() {
   const [editSaved, setEditSaved] = useState("");
   const [editPledge, setEditPledge] = useState("");
   const [editName, setEditName] = useState("");
-  const [editTarget, setEditTarget] = useState("");
+  const [editCategories, setEditCategories] = useState({});
   const [toast, setToast] = useState(null);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [viewingBudgetId, setViewingBudgetId] = useState(null);
 
   const months = monthsUntilTrip();
 
@@ -87,14 +90,32 @@ export default function SavingsTracker() {
     setTimeout(() => setToast(null), 2800);
   }
 
-  const loadTravellers = useCallback(async () => {
+  // Get personal target for a traveller from their category budgets
+  function getPersonalTarget(travellerId) {
+    const cats = budgets[travellerId];
+    if (!cats || Object.keys(cats).length === 0) return DEFAULT_TARGET;
+    return Object.values(cats).reduce((s, a) => s + a, 0);
+  }
+
+  const loadData = useCallback(async () => {
     try {
-      const data = await sbFetch(`${TABLE}?order=id.asc`);
-      setTravellers(data.map((t, i) => ({
+      const [travData, budgetData] = await Promise.all([
+        sbFetch(`${TABLE}?order=id.asc`),
+        sbFetch(`${BUDGETS_TABLE}?order=id.asc`)
+      ]);
+
+      setTravellers(travData.map((t, i) => ({
         ...t,
-        monthlyPledge: t.monthly_pledge,
         color: t.color || COLORS[i % COLORS.length]
       })));
+
+      // Build budgets map: { traveller_id: { category: amount } }
+      const budgetMap = {};
+      budgetData.forEach(b => {
+        if (!budgetMap[b.traveller_id]) budgetMap[b.traveller_id] = {};
+        budgetMap[b.traveller_id][b.category] = b.amount;
+      });
+      setBudgets(budgetMap);
       setError(null);
     } catch (e) {
       setError("Couldn't connect to database. Check your connection.");
@@ -104,24 +125,31 @@ export default function SavingsTracker() {
   }, []);
 
   useEffect(() => {
-    loadTravellers();
-    // Poll every 15 seconds for real-time feel
-    const interval = setInterval(loadTravellers, 15000);
+    loadData();
+    const interval = setInterval(loadData, 15000);
     return () => clearInterval(interval);
-  }, [loadTravellers]);
+  }, [loadData]);
 
   async function addTraveller() {
     if (!newName.trim()) return;
     setSyncing(true);
     try {
       const color = COLORS[travellers.length % COLORS.length];
-      await sbFetch(TABLE, {
+      const newTraveller = await sbFetch(TABLE, {
         method: "POST",
         body: JSON.stringify({ name: newName.trim(), saved: 0, monthly_pledge: 355, color })
       });
+      // Create default budget categories for new traveller
+      const travellerId = newTraveller[0].id;
+      await Promise.all(DEFAULT_CATEGORIES.map(cat =>
+        sbFetch(BUDGETS_TABLE, {
+          method: "POST",
+          body: JSON.stringify({ traveller_id: travellerId, category: cat.label, amount: cat.amount })
+        })
+      ));
       setNewName("");
       setAdding(false);
-      await loadTravellers();
+      await loadData();
       showToast(`${newName.trim()} added ✓`);
     } catch (e) {
       showToast("Failed to add traveller", true);
@@ -133,17 +161,37 @@ export default function SavingsTracker() {
   async function saveEdit(t) {
     setSyncing(true);
     try {
+      // Save traveller details
       await sbFetch(`${TABLE}?id=eq.${t.id}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: editName || t.name,
           saved: Math.max(0, parseFloat(editSaved) || 0),
           monthly_pledge: Math.max(0, parseFloat(editPledge) || 0),
-          personal_target: Math.max(0, parseFloat(editTarget) || TARGET_PER_PERSON)
         })
       });
+
+      // Save each category budget
+      const existingCats = budgets[t.id] || {};
+      await Promise.all(DEFAULT_CATEGORIES.map(async cat => {
+        const amount = Math.max(0, parseFloat(editCategories[cat.label]) || 0);
+        if (existingCats[cat.label] !== undefined) {
+          // Update existing
+          await sbFetch(`${BUDGETS_TABLE}?traveller_id=eq.${t.id}&category=eq.${encodeURIComponent(cat.label)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ amount })
+          });
+        } else {
+          // Insert new
+          await sbFetch(BUDGETS_TABLE, {
+            method: "POST",
+            body: JSON.stringify({ traveller_id: t.id, category: cat.label, amount })
+          });
+        }
+      }));
+
       setEditingId(null);
-      await loadTravellers();
+      await loadData();
       showToast("Saved ✓");
     } catch (e) {
       showToast("Save failed", true);
@@ -160,7 +208,7 @@ export default function SavingsTracker() {
         method: "PATCH",
         body: JSON.stringify({ saved: newSaved })
       });
-      await loadTravellers();
+      await loadData();
       showToast(`${amount >= 0 ? "+" : ""}${fmt(amount)} logged ✓`);
     } catch (e) {
       showToast("Update failed", true);
@@ -174,22 +222,27 @@ export default function SavingsTracker() {
     setEditSaved(String(t.saved || 0));
     setEditPledge(String(t.monthly_pledge || 355));
     setEditName(t.name);
-    setEditTarget(String(t.personal_target || TARGET_PER_PERSON));
+    // Load existing category amounts or defaults
+    const existingCats = budgets[t.id] || {};
+    const cats = {};
+    DEFAULT_CATEGORIES.forEach(cat => {
+      cats[cat.label] = existingCats[cat.label] !== undefined ? existingCats[cat.label] : cat.amount;
+    });
+    setEditCategories(cats);
   }
 
   const totalSaved = travellers.reduce((s, t) => s + (t.saved || 0), 0);
-  const totalTarget = travellers.reduce((s, t) => s + (t.personal_target || TARGET_PER_PERSON), 0) || TARGET_PER_PERSON;
+  const totalTarget = travellers.reduce((s, t) => s + getPersonalTarget(t.id), 0) || DEFAULT_TARGET;
   const totalPct = totalTarget > 0 ? totalSaved / totalTarget : 0;
   const totalPledged = travellers.reduce((s, t) => s + (t.monthly_pledge || 0), 0);
   const totalMonthlyNeeded = travellers.reduce((s, t) => {
-    const target = t.personal_target || TARGET_PER_PERSON;
+    const target = getPersonalTarget(t.id);
     return s + Math.max(0, target - (t.saved || 0)) / months;
   }, 0);
 
   const tabs = [
     { id: "overview", label: "Overview" },
     { id: "travellers", label: "Travellers" },
-    { id: "budget", label: "Budget" },
   ];
 
   if (loading) return (
@@ -203,7 +256,6 @@ export default function SavingsTracker() {
   return (
     <div style={{ fontFamily: "'Segoe UI', system-ui, sans-serif", background: "#0a0a1a", minHeight: "100vh", color: "#e8eaf6", maxWidth: "480px", margin: "0 auto", position: "relative" }}>
 
-      {/* Toast */}
       {toast && (
         <div style={{
           position: "fixed", top: "16px", left: "50%", transform: "translateX(-50%)",
@@ -223,13 +275,10 @@ export default function SavingsTracker() {
             🦘 World Cup 2030 — Group Savings
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-            {syncing && <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#ffcd00", animation: "pulse 1s infinite" }} />}
-            <button onClick={loadTravellers} style={{ background: "rgba(255,255,255,0.08)", border: "1px solid #334", borderRadius: "6px", color: "#8090a8", fontSize: "11px", padding: "4px 8px", cursor: "pointer" }}>
-              ↻ Sync
-            </button>
+            {syncing && <div style={{ width: "8px", height: "8px", borderRadius: "50%", background: "#ffcd00" }} />}
+            <button onClick={loadData} style={{ background: "rgba(255,255,255,0.08)", border: "1px solid #334", borderRadius: "6px", color: "#8090a8", fontSize: "11px", padding: "4px 8px", cursor: "pointer" }}>↻ Sync</button>
           </div>
         </div>
-
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end" }}>
           <div>
             <div style={{ fontSize: "32px", fontWeight: "800", lineHeight: 1, color: "#fff" }}>{fmt(totalSaved)}</div>
@@ -239,11 +288,9 @@ export default function SavingsTracker() {
             <div style={{ fontSize: "15px", fontWeight: "800", color: "#ffcd00" }}>{Math.round(totalPct * 100)}%</div>
           </ProgressRing>
         </div>
-
         <div style={{ marginTop: "16px", background: "#111132", borderRadius: "6px", height: "8px", overflow: "hidden" }}>
           <div style={{ height: "100%", width: `${Math.min(100, totalPct * 100)}%`, background: "linear-gradient(90deg, #003f88, #ffcd00)", borderRadius: "6px", transition: "width 0.6s ease" }} />
         </div>
-
         <div style={{ display: "flex", gap: "12px", marginTop: "14px" }}>
           {[
             { label: "Months to go", value: months },
@@ -256,7 +303,6 @@ export default function SavingsTracker() {
             </div>
           ))}
         </div>
-
         {error && (
           <div style={{ marginTop: "12px", background: "#2d1010", border: "1px solid #6a2d2d", borderRadius: "8px", padding: "10px 14px", fontSize: "13px", color: "#f87171" }}>
             ⚠️ {error}
@@ -290,35 +336,71 @@ export default function SavingsTracker() {
                 <div style={{ fontSize: "13px" }}>Go to Travellers tab to add your crew</div>
               </div>
             ) : travellers.map(t => {
-              const target = t.personal_target || TARGET_PER_PERSON;
+              const target = getPersonalTarget(t.id);
               const pct = (t.saved || 0) / target;
               const remaining = Math.max(0, target - (t.saved || 0));
               const onTrack = (t.monthly_pledge || 0) * months >= remaining;
+              const hasBudget = budgets[t.id] && Object.keys(budgets[t.id]).length > 0;
               return (
-                <div key={t.id} style={{ background: "#111128", borderRadius: "10px", padding: "14px", marginBottom: "10px", border: "1px solid #1a1a35" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                      <div style={{ width: "32px", height: "32px", borderRadius: "50%", background: (t.color || "#4f8ef7") + "22", border: `2px solid ${t.color || "#4f8ef7"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "13px", fontWeight: "800", color: t.color || "#4f8ef7" }}>
-                        {t.name.charAt(0).toUpperCase()}
+                <div key={t.id} style={{ background: "#111128", borderRadius: "10px", marginBottom: "10px", border: "1px solid #1a1a35", overflow: "hidden" }}>
+                  <div style={{ padding: "14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                        <div style={{ width: "32px", height: "32px", borderRadius: "50%", background: (t.color || "#4f8ef7") + "22", border: `2px solid ${t.color || "#4f8ef7"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "13px", fontWeight: "800", color: t.color || "#4f8ef7" }}>
+                          {t.name.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <div style={{ fontWeight: "700", fontSize: "14px" }}>{t.name}</div>
+                          <div style={{ fontSize: "11px", color: "#445566" }}>{fmt(t.monthly_pledge || 0)}/mo · target {fmt(target)}</div>
+                        </div>
                       </div>
-                      <div>
-                        <div style={{ fontWeight: "700", fontSize: "14px" }}>{t.name}</div>
-                        <div style={{ fontSize: "11px", color: "#445566" }}>{fmt(t.monthly_pledge || 0)}/mo pledged</div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontWeight: "800", fontSize: "16px", color: t.color || "#4f8ef7" }}>{fmt(t.saved || 0)}</div>
+                        <div style={{ fontSize: "10px", fontWeight: "700", letterSpacing: "1px", color: onTrack ? "#34d399" : "#f87171" }}>
+                          {onTrack ? "✓ ON TRACK" : "⚠ BEHIND"}
+                        </div>
                       </div>
                     </div>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontWeight: "800", fontSize: "16px", color: t.color || "#4f8ef7" }}>{fmt(t.saved || 0)}</div>
-                      <div style={{ fontSize: "10px", fontWeight: "700", letterSpacing: "1px", color: onTrack ? "#34d399" : "#f87171" }}>
-                        {onTrack ? "✓ ON TRACK" : "⚠ BEHIND"}
-                      </div>
+                    <div style={{ background: "#0a0a18", borderRadius: "4px", height: "5px", overflow: "hidden" }}>
+                      <div style={{ height: "100%", width: `${Math.min(100, pct * 100)}%`, background: t.color || "#4f8ef7", borderRadius: "4px", transition: "width 0.5s ease" }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "6px" }}>
+                      <div style={{ fontSize: "11px", color: "#445566" }}>{fmt(remaining)} remaining · {Math.round(pct * 100)}% there</div>
+                      {hasBudget && (
+                        <button onClick={() => setViewingBudgetId(viewingBudgetId === t.id ? null : t.id)} style={{ background: "none", border: "none", color: "#445566", fontSize: "11px", cursor: "pointer", padding: "0" }}>
+                          {viewingBudgetId === t.id ? "▲ hide budget" : "▼ view budget"}
+                        </button>
+                      )}
                     </div>
                   </div>
-                  <div style={{ background: "#0a0a18", borderRadius: "4px", height: "5px", overflow: "hidden" }}>
-                    <div style={{ height: "100%", width: `${Math.min(100, pct * 100)}%`, background: t.color || "#4f8ef7", borderRadius: "4px", transition: "width 0.5s ease" }} />
-                  </div>
-                  <div style={{ fontSize: "11px", color: "#445566", marginTop: "5px" }}>
-                    {fmt(remaining)} remaining · {Math.round(pct * 100)}% there
-                  </div>
+
+                  {/* Expandable personal budget breakdown */}
+                  {viewingBudgetId === t.id && hasBudget && (
+                    <div style={{ borderTop: "1px solid #1a1a35", padding: "12px 14px" }}>
+                      <div style={{ fontSize: "10px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "10px" }}>
+                        {t.name}'s Budget
+                      </div>
+                      {DEFAULT_CATEGORIES.map(cat => {
+                        const amount = budgets[t.id][cat.label] !== undefined ? budgets[t.id][cat.label] : cat.amount;
+                        const catPct = amount / target;
+                        return (
+                          <div key={cat.label} style={{ marginBottom: "8px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "3px" }}>
+                              <span style={{ fontSize: "12px", color: "#c8d0e0" }}>{cat.icon} {cat.label}</span>
+                              <span style={{ fontSize: "12px", fontWeight: "700", color: cat.color }}>{fmt(amount)}</span>
+                            </div>
+                            <div style={{ background: "#0a0a18", borderRadius: "3px", height: "3px", overflow: "hidden" }}>
+                              <div style={{ height: "100%", width: `${catPct * 100}%`, background: cat.color, borderRadius: "3px" }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div style={{ borderTop: "1px solid #1a1a35", marginTop: "8px", paddingTop: "8px", display: "flex", justifyContent: "space-between" }}>
+                        <span style={{ fontSize: "12px", fontWeight: "700", color: "#e8eaf6" }}>Total</span>
+                        <span style={{ fontSize: "12px", fontWeight: "800", color: "#ffcd00" }}>{fmt(target)}</span>
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -329,7 +411,7 @@ export default function SavingsTracker() {
               { label: "Flights booked", pct: 0.29, icon: "✈️", desc: "~$5k pp saved" },
               { label: "Accommodation locked", pct: 0.50, icon: "🏨", desc: "~$8.5k pp saved" },
               { label: "Tickets purchased", pct: 0.56, icon: "⚽", desc: "~$9.4k pp saved" },
-              { label: "Fully funded!", pct: 1.0, icon: "🏆", desc: `${fmt(TARGET_PER_PERSON)} pp saved` },
+              { label: "Fully funded!", pct: 1.0, icon: "🏆", desc: `${fmt(DEFAULT_TARGET)} pp saved` },
             ].map(m => {
               const reached = totalPct >= m.pct;
               return (
@@ -357,10 +439,11 @@ export default function SavingsTracker() {
               <div key={t.id} style={{ background: "#111128", borderRadius: "12px", padding: "16px", marginBottom: "12px", border: `1px solid ${editingId === t.id ? (t.color || "#4f8ef7") : "#1a1a35"}` }}>
                 {editingId === t.id ? (
                   <div>
-                    <div style={{ fontSize: "11px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "12px" }}>Editing {t.name}</div>
+                    <div style={{ fontSize: "11px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "14px" }}>Editing {t.name}</div>
+
+                    {/* Basic fields */}
                     {[
                       { label: "Name", val: editName, set: setEditName, type: "text" },
-                      { label: "My savings target ($)", val: editTarget, set: setEditTarget, type: "number" },
                       { label: "Total saved ($)", val: editSaved, set: setEditSaved, type: "number" },
                       { label: "Monthly pledge ($)", val: editPledge, set: setEditPledge, type: "number" },
                     ].map(field => (
@@ -370,7 +453,37 @@ export default function SavingsTracker() {
                           style={{ width: "100%", background: "#0a0a18", border: `1px solid ${(t.color || "#4f8ef7")}44`, borderRadius: "8px", padding: "10px 12px", color: "#e8eaf6", fontSize: "15px", outline: "none", boxSizing: "border-box" }} />
                       </div>
                     ))}
-                    <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+
+                    {/* Category budgets */}
+                    <div style={{ marginTop: "16px", marginBottom: "8px" }}>
+                      <div style={{ fontSize: "11px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "10px" }}>My Budget by Category</div>
+                      {DEFAULT_CATEGORIES.map(cat => (
+                        <div key={cat.label} style={{ marginBottom: "8px", display: "flex", alignItems: "center", gap: "10px" }}>
+                          <span style={{ fontSize: "16px", minWidth: "24px" }}>{cat.icon}</span>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: "11px", color: "#556070", marginBottom: "3px" }}>{cat.label}</div>
+                            <input
+                              type="number"
+                              value={editCategories[cat.label] ?? cat.amount}
+                              onChange={e => setEditCategories(prev => ({ ...prev, [cat.label]: e.target.value }))}
+                              style={{ width: "100%", background: "#0a0a18", border: `1px solid ${cat.color}44`, borderRadius: "6px", padding: "8px 10px", color: "#e8eaf6", fontSize: "14px", outline: "none", boxSizing: "border-box" }}
+                            />
+                          </div>
+                          <div style={{ fontSize: "12px", color: cat.color, minWidth: "50px", textAlign: "right" }}>
+                            {fmt(parseFloat(editCategories[cat.label]) || 0)}
+                          </div>
+                        </div>
+                      ))}
+                      {/* Auto-total */}
+                      <div style={{ background: "#0a0a18", borderRadius: "8px", padding: "10px 12px", display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "4px" }}>
+                        <span style={{ fontSize: "13px", color: "#8090a8" }}>My total target</span>
+                        <span style={{ fontSize: "16px", fontWeight: "800", color: "#ffcd00" }}>
+                          {fmt(DEFAULT_CATEGORIES.reduce((s, cat) => s + (parseFloat(editCategories[cat.label]) || 0), 0))}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: "8px", marginTop: "14px" }}>
                       <button onClick={() => saveEdit(t)} disabled={syncing} style={{ flex: 1, padding: "10px", borderRadius: "8px", background: t.color || "#4f8ef7", color: "#000", border: "none", fontWeight: "700", fontSize: "14px", cursor: "pointer", opacity: syncing ? 0.6 : 1 }}>
                         {syncing ? "Saving..." : "Save"}
                       </button>
@@ -386,12 +499,12 @@ export default function SavingsTracker() {
                         </div>
                         <div>
                           <div style={{ fontWeight: "700", fontSize: "15px" }}>{t.name}</div>
-                          <div style={{ fontSize: "12px", color: "#445566" }}>{fmt(t.monthly_pledge || 0)}/mo · target {fmt(t.personal_target || TARGET_PER_PERSON)}</div>
+                          <div style={{ fontSize: "12px", color: "#445566" }}>{fmt(t.monthly_pledge || 0)}/mo · target {fmt(getPersonalTarget(t.id))}</div>
                         </div>
                       </div>
                       <div style={{ textAlign: "right" }}>
                         <div style={{ fontWeight: "800", fontSize: "18px", color: t.color || "#4f8ef7" }}>{fmt(t.saved || 0)}</div>
-                        <div style={{ fontSize: "11px", color: "#445566" }}>{Math.round((t.saved || 0) / (t.personal_target || TARGET_PER_PERSON) * 100)}% of {fmt(t.personal_target || TARGET_PER_PERSON)}</div>
+                        <div style={{ fontSize: "11px", color: "#445566" }}>{Math.round((t.saved || 0) / getPersonalTarget(t.id) * 100)}% of goal</div>
                       </div>
                     </div>
                     <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
@@ -402,24 +515,19 @@ export default function SavingsTracker() {
                       ))}
                     </div>
                     <button onClick={() => startEdit(t)} style={{ width: "100%", padding: "9px", background: "#1a1a35", border: "1px solid #2a2a50", borderRadius: "8px", color: "#8090a8", fontSize: "13px", fontWeight: "600", cursor: "pointer" }}>
-                      Edit details
+                      Edit details & budget
                     </button>
                   </div>
                 )}
               </div>
             ))}
 
-            {/* Add traveller */}
             {adding ? (
               <div style={{ background: "#111128", borderRadius: "12px", padding: "16px", border: "1px solid #2a2a50" }}>
                 <div style={{ fontSize: "12px", color: "#556070", marginBottom: "8px" }}>Name</div>
-                <input
-                  type="text" value={newName} onChange={e => setNewName(e.target.value)}
-                  placeholder="Enter name..."
-                  onKeyDown={e => e.key === "Enter" && addTraveller()}
-                  autoFocus
-                  style={{ width: "100%", background: "#0a0a18", border: "1px solid #334466", borderRadius: "8px", padding: "10px 12px", color: "#e8eaf6", fontSize: "15px", outline: "none", boxSizing: "border-box", marginBottom: "10px" }}
-                />
+                <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
+                  placeholder="Enter name..." onKeyDown={e => e.key === "Enter" && addTraveller()} autoFocus
+                  style={{ width: "100%", background: "#0a0a18", border: "1px solid #334466", borderRadius: "8px", padding: "10px 12px", color: "#e8eaf6", fontSize: "15px", outline: "none", boxSizing: "border-box", marginBottom: "10px" }} />
                 <div style={{ display: "flex", gap: "8px" }}>
                   <button onClick={addTraveller} disabled={syncing || !newName.trim()} style={{ flex: 1, padding: "10px", borderRadius: "8px", background: "#ffcd00", color: "#000", border: "none", fontWeight: "700", fontSize: "14px", cursor: "pointer", opacity: (!newName.trim() || syncing) ? 0.5 : 1 }}>
                     {syncing ? "Adding..." : "Add"}
@@ -432,66 +540,6 @@ export default function SavingsTracker() {
                 + Add traveller
               </button>
             )}
-          </div>
-        )}
-
-        {/* BUDGET */}
-        {activeTab === "budget" && (
-          <div>
-            <div style={{ marginBottom: "8px", fontSize: "11px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase" }}>Per Person Budget Breakdown</div>
-            <div style={{ background: "#111128", borderRadius: "12px", overflow: "hidden", border: "1px solid #1a1a35", marginBottom: "16px" }}>
-              {BUDGET_BREAKDOWN.map((item, i) => {
-                const pct = item.amount / TARGET_PER_PERSON;
-                return (
-                  <div key={item.label} style={{ padding: "14px 16px", borderBottom: i < BUDGET_BREAKDOWN.length - 1 ? "1px solid #1a1a35" : "none" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                        <span style={{ fontSize: "18px" }}>{item.icon}</span>
-                        <span style={{ fontSize: "14px", fontWeight: "600" }}>{item.label}</span>
-                      </div>
-                      <div style={{ textAlign: "right" }}>
-                        <span style={{ fontWeight: "700", color: item.color }}>{fmt(item.amount)}</span>
-                        <span style={{ fontSize: "11px", color: "#445566", marginLeft: "6px" }}>{Math.round(pct * 100)}%</span>
-                      </div>
-                    </div>
-                    <div style={{ background: "#0a0a18", borderRadius: "3px", height: "4px", overflow: "hidden" }}>
-                      <div style={{ height: "100%", width: `${pct * 100}%`, background: item.color, borderRadius: "3px" }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ background: "linear-gradient(135deg, #003f88, #001a4d)", borderRadius: "12px", padding: "16px", border: "1px solid #ffcd00", marginBottom: "16px" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <div>
-                  <div style={{ fontSize: "12px", color: "#a0b4cc", marginBottom: "2px" }}>Total per person</div>
-                  <div style={{ fontSize: "28px", fontWeight: "800", color: "#ffcd00" }}>{fmt(TARGET_PER_PERSON)}</div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontSize: "12px", color: "#a0b4cc", marginBottom: "2px" }}>Group total ({travellers.length} people)</div>
-                  <div style={{ fontSize: "22px", fontWeight: "700", color: "#fff" }}>{fmt(TARGET_PER_PERSON * travellers.length)}</div>
-                </div>
-              </div>
-            </div>
-
-            <div style={{ background: "#111128", borderRadius: "12px", padding: "16px", border: "1px solid #1a1a35" }}>
-              <div style={{ fontSize: "11px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "12px" }}>Monthly savings needed</div>
-              {[
-                { label: "Months until Jun 2030", val: months },
-                { label: "Target per person", val: fmt(TARGET_PER_PERSON) },
-              ].map(r => (
-                <div key={r.label} style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px" }}>
-                  <span style={{ color: "#8090a8", fontSize: "14px" }}>{r.label}</span>
-                  <span style={{ fontWeight: "700" }}>{r.val}</span>
-                </div>
-              ))}
-              <div style={{ height: "1px", background: "#1a1a35", margin: "12px 0" }} />
-              <div style={{ display: "flex", justifyContent: "space-between" }}>
-                <span style={{ color: "#e8eaf6", fontSize: "15px", fontWeight: "600" }}>Each person needs to save</span>
-                <span style={{ fontWeight: "800", fontSize: "18px", color: "#ffcd00" }}>{fmt(TARGET_PER_PERSON / months)}/mo</span>
-              </div>
-            </div>
           </div>
         )}
       </div>
