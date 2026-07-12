@@ -2,9 +2,13 @@ name: Monthly Savings Reminders
 
 on:
   schedule:
-    # Runs at 9:00 AM AEST (23:00 UTC) on the 1st of every month
     - cron: '0 23 1 * *'
-  workflow_dispatch: # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      traveller_name:
+        description: 'Send test email to specific traveller (leave blank for all)'
+        required: false
+        default: ''
 
 jobs:
   send-reminders:
@@ -24,4 +28,5 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           SITE_URL: https://nsinfield557-ctrl.github.io/wc_travel_savers/
+          TRAVELLER_NAME: ${{ github.event.inputs.traveller_name }}
         run: node scripts/send-reminders.mjs
