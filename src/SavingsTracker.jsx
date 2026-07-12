@@ -244,12 +244,17 @@ export default function SavingsTracker() {
   async function saveEdit(t) {
     setSyncing(true);
     try {
+      const newSaved = Math.max(0, parseFloat(editSaved) || 0);
+      const newCatTotal = DEFAULT_CATEGORIES.reduce((s, cat) => s + (Math.max(0, parseFloat(editCategories[cat.label]) || 0)), 0);
+      const target = newCatTotal || getPersonalTarget(t.id);
+      const remaining = Math.max(0, target - newSaved);
+      const newPledge = remaining > 0 ? Math.ceil(remaining / months) : 0;
       await sbFetch(`${TABLE}?id=eq.${t.id}`, {
         method: "PATCH",
         body: JSON.stringify({
           name: editName || t.name,
-          saved: Math.max(0, parseFloat(editSaved) || 0),
-          monthly_pledge: Math.max(0, parseFloat(editPledge) || 0),
+          saved: newSaved,
+          monthly_pledge: newPledge,
           emoji: editEmoji,
           email: editEmail.trim() || null,
         })
@@ -284,10 +289,13 @@ export default function SavingsTracker() {
     setSyncing(true);
     try {
       const newSaved = Math.max(0, (t.saved || 0) + amount);
+      const target = getPersonalTarget(t.id);
+      const remaining = Math.max(0, target - newSaved);
+      const newPledge = remaining > 0 ? Math.ceil(remaining / months) : 0;
       await Promise.all([
         sbFetch(`${TABLE}?id=eq.${t.id}`, {
           method: "PATCH",
-          body: JSON.stringify({ saved: newSaved })
+          body: JSON.stringify({ saved: newSaved, monthly_pledge: newPledge })
         }),
         sbFetch(CONTRIBUTIONS_TABLE, {
           method: "POST",
@@ -295,7 +303,7 @@ export default function SavingsTracker() {
         })
       ]);
       await loadData();
-      showToast(`+${fmt(amount)} logged ✓`);
+      showToast(`+${fmt(amount)} logged · pledge updated to ${fmt(newPledge)}/mo ✓`);
     } catch (e) {
       showToast("Update failed", true);
     } finally {
@@ -365,18 +373,6 @@ export default function SavingsTracker() {
     setEditCategories(cats);
   }
 
-  // This month's contributions
-  const now = new Date();
-  const thisMonthKey = `${now.getFullYear()}-${now.getMonth()}`;
-  const leaderboard = travellers.map(t => {
-    const thisMonthContribs = (contributions[t.id] || []).filter(c => {
-      const d = new Date(c.created_at);
-      return `${d.getFullYear()}-${d.getMonth()}` === thisMonthKey;
-    });
-    const thisMonthTotal = thisMonthContribs.reduce((s, c) => s + c.amount, 0);
-    return { ...t, thisMonthTotal };
-  }).sort((a, b) => b.thisMonthTotal - a.thisMonthTotal);
-
   const totalSaved = travellers.reduce((s, t) => s + (t.saved || 0), 0);
   const totalTarget = travellers.reduce((s, t) => s + getPersonalTarget(t.id), 0) || DEFAULT_TARGET;
   const totalPct = totalTarget > 0 ? totalSaved / totalTarget : 0;
@@ -390,7 +386,6 @@ export default function SavingsTracker() {
   const tabs = [
     { id: "overview", label: "📊" },
     { id: "travellers", label: "👥" },
-    { id: "leaderboard", label: "🏆" },
     { id: "polls", label: "🗳️" },
     { id: "itinerary", label: "🗺️" },
   ];
@@ -656,8 +651,25 @@ export default function SavingsTracker() {
               Update Savings · {travellers.length} traveller{travellers.length !== 1 ? "s" : ""}
             </div>
 
-            {travellers.map(t => (
-              <div key={t.id} style={{ background: "#111128", borderRadius: "12px", padding: "16px", marginBottom: "12px", border: `1px solid ${editingId === t.id ? (t.color || "#4f8ef7") : "#1a1a35"}` }}>
+            {/* Identity note */}
+            {(() => {
+              const matched = travellers.find(t => t.name.toLowerCase() === myName.toLowerCase());
+              return myName ? (
+                <div style={{ background: matched ? "#0d2818" : "#2d1a0a", border: `1px solid ${matched ? "#2d6a4f" : "#fb923c"}`, borderRadius: "8px", padding: "10px 14px", marginBottom: "14px", fontSize: "13px", color: matched ? "#74c69d" : "#fb923c" }}>
+                  {matched ? `✓ Logged in as ${matched.name} — you can edit your own record` : `⚠️ "${myName}" doesn't match any traveller — you're in view-only mode`}
+                  <button onClick={() => setShowNamePicker(true)} style={{ background: "none", border: "none", color: "#6680a0", fontSize: "11px", cursor: "pointer", marginLeft: "8px", textDecoration: "underline" }}>change</button>
+                </div>
+              ) : (
+                <div style={{ background: "#1a1a2e", border: "1px solid #2a2a50", borderRadius: "8px", padding: "10px 14px", marginBottom: "14px", fontSize: "13px", color: "#6680a0" }}>
+                  <button onClick={() => setShowNamePicker(true)} style={{ background: "none", border: "none", color: "#ffcd00", fontSize: "13px", cursor: "pointer", padding: 0 }}>Set your name</button> to edit your own savings
+                </div>
+              );
+            })()}
+
+            {travellers.map(t => {
+              const isMe = myName && t.name.toLowerCase() === myName.toLowerCase();
+              return (
+              <div key={t.id} style={{ background: "#111128", borderRadius: "12px", padding: "16px", marginBottom: "12px", border: `1px solid ${editingId === t.id ? (t.color || "#4f8ef7") : isMe ? (t.color || "#4f8ef7") + "44" : "#1a1a35"}` }}>
                 {editingId === t.id ? (
                   <div>
                     <div style={{ fontSize: "11px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "14px" }}>Editing {t.name}</div>
@@ -736,36 +748,42 @@ export default function SavingsTracker() {
                       </div>
                     </div>
 
-                    {/* Quick add */}
-                    <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
-                      {[100, 250, 500, 1000].map(amt => (
-                        <button key={amt} onClick={() => addContribution(t, amt)} disabled={syncing} style={{ flex: 1, padding: "8px 0", background: (t.color || "#4f8ef7") + "18", border: `1px solid ${(t.color || "#4f8ef7")}44`, borderRadius: "6px", color: t.color || "#4f8ef7", fontSize: "12px", fontWeight: "700", cursor: "pointer", opacity: syncing ? 0.5 : 1 }}>
-                          +{fmt(amt)}
+                    {/* Quick add — only for own record */}
+                    {isMe ? (
+                      <>
+                        <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+                          {[100, 250, 500, 1000].map(amt => (
+                            <button key={amt} onClick={() => addContribution(t, amt)} disabled={syncing} style={{ flex: 1, padding: "8px 0", background: (t.color || "#4f8ef7") + "18", border: `1px solid ${(t.color || "#4f8ef7")}44`, borderRadius: "6px", color: t.color || "#4f8ef7", fontSize: "12px", fontWeight: "700", cursor: "pointer", opacity: syncing ? 0.5 : 1 }}>
+                              +{fmt(amt)}
+                            </button>
+                          ))}
+                        </div>
+                        {showCustomInput === t.id ? (
+                          <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+                            <input type="number" value={customAmount} onChange={e => setCustomAmount(e.target.value)} placeholder="Custom amount..."
+                              style={{ flex: 1, background: "#0a0a18", border: "1px solid #334466", borderRadius: "6px", padding: "8px 10px", color: "#e8eaf6", fontSize: "14px", outline: "none" }} />
+                            <button onClick={() => addContribution(t, parseFloat(customAmount) || 0)} style={{ padding: "8px 14px", background: t.color || "#4f8ef7", border: "none", borderRadius: "6px", color: "#000", fontWeight: "700", fontSize: "13px", cursor: "pointer" }}>Add</button>
+                            <button onClick={() => { setShowCustomInput(null); setCustomAmount(""); }} style={{ padding: "8px 10px", background: "#1a1a35", border: "none", borderRadius: "6px", color: "#8090a8", fontSize: "13px", cursor: "pointer" }}>✕</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setShowCustomInput(t.id)} style={{ width: "100%", padding: "7px", background: "none", border: "1px dashed #2a2a50", borderRadius: "6px", color: "#445566", fontSize: "12px", cursor: "pointer", marginBottom: "8px" }}>
+                            + Custom amount
+                          </button>
+                        )}
+                        <button onClick={() => startEdit(t)} style={{ width: "100%", padding: "9px", background: "#1a1a35", border: "1px solid #2a2a50", borderRadius: "8px", color: "#8090a8", fontSize: "13px", fontWeight: "600", cursor: "pointer" }}>
+                          Edit details & budget
                         </button>
-                      ))}
-                    </div>
-
-                    {/* Custom amount */}
-                    {showCustomInput === t.id ? (
-                      <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
-                        <input type="number" value={customAmount} onChange={e => setCustomAmount(e.target.value)} placeholder="Custom amount..."
-                          style={{ flex: 1, background: "#0a0a18", border: "1px solid #334466", borderRadius: "6px", padding: "8px 10px", color: "#e8eaf6", fontSize: "14px", outline: "none" }} />
-                        <button onClick={() => addContribution(t, parseFloat(customAmount) || 0)} style={{ padding: "8px 14px", background: t.color || "#4f8ef7", border: "none", borderRadius: "6px", color: "#000", fontWeight: "700", fontSize: "13px", cursor: "pointer" }}>Add</button>
-                        <button onClick={() => { setShowCustomInput(null); setCustomAmount(""); }} style={{ padding: "8px 10px", background: "#1a1a35", border: "none", borderRadius: "6px", color: "#8090a8", fontSize: "13px", cursor: "pointer" }}>✕</button>
-                      </div>
+                      </>
                     ) : (
-                      <button onClick={() => setShowCustomInput(t.id)} style={{ width: "100%", padding: "7px", background: "none", border: "1px dashed #2a2a50", borderRadius: "6px", color: "#445566", fontSize: "12px", cursor: "pointer", marginBottom: "8px" }}>
-                        + Custom amount
-                      </button>
+                      <div style={{ fontSize: "12px", color: "#334455", textAlign: "center", padding: "6px 0" }}>
+                        👀 View only
+                      </div>
                     )}
-
-                    <button onClick={() => startEdit(t)} style={{ width: "100%", padding: "9px", background: "#1a1a35", border: "1px solid #2a2a50", borderRadius: "8px", color: "#8090a8", fontSize: "13px", fontWeight: "600", cursor: "pointer" }}>
-                      Edit details & budget
-                    </button>
                   </div>
                 )}
               </div>
-            ))}
+            );
+            })}
 
             {adding ? (
               <div style={{ background: "#111128", borderRadius: "12px", padding: "16px", border: "1px solid #2a2a50" }}>
@@ -785,52 +803,6 @@ export default function SavingsTracker() {
                 + Add traveller
               </button>
             )}
-          </div>
-        )}
-
-        {/* LEADERBOARD */}
-        {activeTab === "leaderboard" && (
-          <div>
-            <div style={{ marginBottom: "8px", fontSize: "11px", color: "#445566", letterSpacing: "2px", textTransform: "uppercase" }}>This Month's Top Savers</div>
-            {leaderboard.map((t, i) => {
-              const target = getPersonalTarget(t.id);
-              const pct = (t.saved || 0) / target;
-              const streak = getStreak(contributions[t.id]);
-              const medals = ["🥇","🥈","🥉"];
-              return (
-                <div key={t.id} style={{ background: i === 0 ? "#1a1a0a" : "#111128", borderRadius: "12px", padding: "14px 16px", marginBottom: "10px", border: `1px solid ${i === 0 ? "#ffcd00" : "#1a1a35"}` }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                    <div style={{ fontSize: "24px", minWidth: "32px" }}>{medals[i] || `${i+1}`}</div>
-                    <div style={{ width: "36px", height: "36px", borderRadius: "50%", background: (t.color || "#4f8ef7") + "22", border: `2px solid ${t.color || "#4f8ef7"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "16px" }}>
-                      {t.emoji || t.name.charAt(0).toUpperCase()}
-                    </div>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: "700", fontSize: "15px" }}>{t.name}
-                        {streak > 1 && <span style={{ marginLeft: "6px", fontSize: "11px", color: "#fb923c" }}>🔥 {streak}mo</span>}
-                      </div>
-                      <div style={{ background: "#0a0a18", borderRadius: "3px", height: "4px", overflow: "hidden", marginTop: "6px" }}>
-                        <div style={{ height: "100%", width: `${Math.min(100, pct * 100)}%`, background: t.color || "#4f8ef7", borderRadius: "3px" }} />
-                      </div>
-                    </div>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontWeight: "800", fontSize: "16px", color: i === 0 ? "#ffcd00" : (t.color || "#4f8ef7") }}>{fmt(t.saved || 0)}</div>
-                      {t.thisMonthTotal > 0 && <div style={{ fontSize: "11px", color: "#34d399" }}>+{fmt(t.thisMonthTotal)} this month</div>}
-                    </div>
-                  </div>
-
-                  {/* Badges */}
-                  {BADGES.filter(b => b.threshold(t.saved || 0, target)).length > 0 && (
-                    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "10px" }}>
-                      {BADGES.filter(b => b.threshold(t.saved || 0, target)).map(b => (
-                        <div key={b.id} title={b.desc} style={{ background: "#1a1a35", borderRadius: "20px", padding: "2px 8px", fontSize: "11px", display: "flex", alignItems: "center", gap: "3px" }}>
-                          {b.icon} <span style={{ color: "#8090a8" }}>{b.label}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
           </div>
         )}
 
