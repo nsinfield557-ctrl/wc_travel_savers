@@ -131,6 +131,7 @@ export default function SavingsTracker() {
   const [editPledge, setEditPledge] = useState("");
   const [editName, setEditName] = useState("");
   const [editEmoji, setEditEmoji] = useState("🦘");
+  const [editEmail, setEditEmail] = useState("");
   const [editCategories, setEditCategories] = useState({});
   const [toast, setToast] = useState(null);
   const [adding, setAdding] = useState(false);
@@ -250,6 +251,7 @@ export default function SavingsTracker() {
           saved: Math.max(0, parseFloat(editSaved) || 0),
           monthly_pledge: Math.max(0, parseFloat(editPledge) || 0),
           emoji: editEmoji,
+          email: editEmail.trim() || null,
         })
       });
       const existingCats = budgets[t.id] || {};
@@ -354,6 +356,7 @@ export default function SavingsTracker() {
     setEditPledge(String(t.monthly_pledge || 355));
     setEditName(t.name);
     setEditEmoji(t.emoji || "🦘");
+    setEditEmail(t.email || "");
     const existingCats = budgets[t.id] || {};
     const cats = {};
     DEFAULT_CATEGORIES.forEach(cat => {
@@ -671,6 +674,7 @@ export default function SavingsTracker() {
 
                     {[
                       { label: "Name", val: editName, set: setEditName, type: "text" },
+                      { label: "Email (for monthly reminders)", val: editEmail, set: setEditEmail, type: "email" },
                       { label: "Total saved ($)", val: editSaved, set: setEditSaved, type: "number" },
                       { label: "Monthly pledge ($)", val: editPledge, set: setEditPledge, type: "number" },
                     ].map(field => (
@@ -721,7 +725,9 @@ export default function SavingsTracker() {
                         </div>
                         <div>
                           <div style={{ fontWeight: "700", fontSize: "15px" }}>{t.name}</div>
-                          <div style={{ fontSize: "12px", color: "#445566" }}>{fmt(t.monthly_pledge || 0)}/mo · target {fmt(getPersonalTarget(t.id))}</div>
+                          <div style={{ fontSize: "12px", color: "#445566" }}>{fmt(t.monthly_pledge || 0)}/mo · target {fmt(getPersonalTarget(t.id))}
+                            {t.email && <span style={{ marginLeft: "6px", color: "#34d399" }}>📧</span>}
+                          </div>
                         </div>
                       </div>
                       <div style={{ textAlign: "right" }}>
