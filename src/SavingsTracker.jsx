@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 
-const SUPABASE_URL = "https://ljfjhfwsxhkzkdbuwvsd.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxqZmpoZndzeGhremtkYnV3dnNkIiwicm9sZSI6ImFub24iLC
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const TABLE = "wc2030_travellers";
 const TARGET_PER_PERSON = 17000;
 const TRIP_DATE = new Date("2030-06-08");
